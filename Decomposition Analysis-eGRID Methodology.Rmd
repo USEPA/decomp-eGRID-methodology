@@ -1,0 +1,1326 @@
+---
+title: "Emissions Reductions 2000-2018"
+output:
+  html_document:
+    toc: yes
+    #css: styles.css    #uncomment to use style sheet
+    out.width: '100%'
+  html_notebook:
+    theme: readable
+    toc: yes
+    #css: styles.css    #uncomment to use style sheet
+    out.width: '100%'
+  pdf_document:
+    df_print: kable
+    toc: true
+---
+# Summary #
+The following is an investigation of emission reductions from 2000 to 2018.  
+
+
+Data Sets:  
+*	CAMD data from 2000-2018 (CAMDy2000-2018.csv)  
+*	EIA data from 2000-2018 (eia923_2000-2018.csv)    
+
+
+The EIA data was obtained from https://www.eia.gov/electricity/data/eia923/ and includes Generation and Fuel Data from Schedules 3A and 5A (Year,Plant ID,Combined Heat & Power Plant,Reported Prime Mover,Reported Fuel Type Code,Total Fuel Consumption Quantity,Electric Fuel Consumption Quantity,Total Fuel Consumption MMBTUS, Elec Fuel Consumption MMBTUs, Net Generation) and Average Sulfur Content from Schedule 2 (Fuel Costs and Receipts). Prior to 2008, EIA906 & EIA920 were used for Generation and Fuel Data and FERC-423 for fuel cost data. That data was obtained from https://www.eia.gov/electricity/data/eia423/. This data was collected, aggregated by year, and saved into a single csv file (eia923_2000-2018.csv). 
+
+
+The following actions will be performed:  
+- Fill in data gaps for SO2, NOx, and CO2 mass using the methodologies described in the eGRID 2016 TSD (include a source flag for each value to indicate whether it was from CAMD data or calculated)  
+- For SO2 and NOx emissions, calculate the annual emission rates (mass/heat input and mass/gross load); for CO2 emissions, calculate the emission rate (mass/gross load)  
+- For SO2, NOx, and CO2, calculate a BAU  value for each year (for the purpose of this activity, use the 2000 level emissions for each unit as a placeholder)  
+- Calculate each unit's annual heat rate as Btu/kWh  
+
+**To run this R Notebook, include the above files in the same directory as the R Notebook.**  
+R requirements:  
+R version 3.6.0 (64-bit)  
+
+
+The following packages are required:  
+*tidyverse_1.2.1, data.table_1.12.2, tidyr_0.8.3, knitr_1.23, tinytex_0.14, DescTools_0.99.28, kableExtra_1.1.0, ggpubr_0.2.1, magrittr_1.5,      forcats_0.4.0, stringr_1.4.0, dplyr_0.8.1, purr_0.3.2, readr_1.3.1, tibble_2.1.3, ggplot2_3.2.0*
+```{r warning=FALSE, include=FALSE}
+# load necessary packages
+packages <- c("tidyverse", "data.table", "lubridate", "tidyr", "knitr", "tinytex", "DescTools", "kableExtra", "ggpubr","rstudioapi")
+missing.packages <- setdiff(packages,installed.packages()[,"Package"])
+if(length(missing.packages)) install.packages(missing.packages)
+for(pkg in packages) {
+do.call("library",list(pkg))
+}
+```
+
+
+```{r include=FALSE}
+# set working directory
+setwd("./")
+
+# set notebook options
+options(scipen = 999)         # disable scientific notation
+options(tibble.width = 100)   # display more columns in tibbles (data tables)
+```
+
+
+## Data Exploration ##
+```{r}
+# read in CAMD dataset
+data <- read.csv("CAMDy2000-2018.csv", na.strings=c("","NA"), stringsAsFactors = FALSE)
+```
+
+```{r}
+#read in EIA dataset
+eiadata <- read_csv("eia923_2000-2018.csv",na=c("","NA"), ,col_types=cols(
+  Year = col_integer(),
+  Oris.Code = col_integer(),
+  CHP = col_character(),
+  Prime.Mover = col_character(),
+  Fuel.Type = col_character(),
+  Total.Fuel.Cons.Qty = col_number(),
+  Elec.Fuel.Cons.Qty = col_number(),
+  Total.Fuel.Cons.MMBtu = col_number(),
+  Elec.Fuel.Cons.MMBtu = col_number(),
+  Annual.Net.Gen = col_number(),
+  Annual.Avg.Heat.Content = col_double(),
+  Annual.Avg.Sulfur.Content = col_double()
+))
+```
+
+CAMDy2000-2018.csv has 83933 observations of 46 variables  
+eia923_2000-2018.csv has 185327 observations of 13 variables
+
+
+```{r}
+# change column names in CAMD data
+names(data) <- c("Op.Year","Key.Unit.Id","State","Facility.Name","Oris.Code","Unit.Id","Stack.Id","NERC.Region","Op.Status","Unit.Retired.Date","Unit.LTCS.Date","Programs","Commercial.Op.Date","Unit.Type","NOx.Control","SO2.Control","Hg.Control","Ret.Hg.Control","Fuel.Begin.Date","Fuel.End.Date","Switched.Fuel","Primary.Fuel.Type","Previous.Primary.Fuel","Nameplate.Capacity","Nameplate.Capacity.UOM","Annual.Op.Time","Annual.HI","HI.data.source","Annual.Gross.Load","GLOAD.data.source","Annual.Steam.load","SLOAD.data.source","Annual.NOx.mass","NOx.mass.data.source","Annual.SO2.mass","SO2.mass.data.source","Annual.CO2.mass","CO2.mass.data.source","Ret.NOx.1","NOx.End.Date.1","Ret.NOx.2","NOx.End.Date.2","Ret.NOx.3","NOx.End.Date.3","Ret.SO2","SO2.End.Date")
+```
+
+```{r}
+# some Unit.Id values are appearing as dates, so recode them to appropriate values
+data$Unit.Id <- recode(data$Unit.Id, "1-Jan" = "1-1", "2-Jan" = "1-2", "25-Jan" = "1-25", "1-Feb" = "2-1", "2-Feb" = "2-2", "1-Mar" = "3-1", "2-Mar" = "3-2", "1-Apr"="4-1","2-Apr"="4-2","1-May"="5-1","2-May"="5-2","1-Jun"="6-1","1-Jul"="7-1","2-Jul"="7-2","1-Aug"="8-1") 
+```
+
+```{r}
+# add identifier to data dataframe
+ data %>% add_column("idx" = 1:nrow(data), .before = "Op.Year") -> data
+```
+
+```{r}
+# check for missing values in CAMD data
+sapply(data, function(x) sum(is.na(x)))
+```
+There are missing values in:  
+- Stack.Id  
+- NERC.Region  
+- Unit.Retired.Date  
+- Unit.LTCS.Date  
+- Unit.Type  
+- NOx.Control  
+- SO2.Control  
+- Hg.Control  
+- Ret.Hg.Control  
+- Fuel.End.Date  
+- Switched.Fuel  
+- Previous.Primary.Fuel  
+- Nameplate.Capacity  
+- Nameplate.Capacity.UOM  
+- Annual.Op.Time  
+- Annual.HI  
+- HI.data.source  
+- Annual.Gross.Load  
+- GLOAD.data.source  
+- Annual.Steam.Load  
+- SLOAD.data.source  
+- Annual.NOx.mass  
+- NOx.mass.data.source  
+- Annual.SO2.mass  
+- SO2.mass.data.source  
+- Annual.CO2.mass  
+- CO2.mass.data.source  
+- Ret.NOx.1  
+- NOx.End.Date.1  
+- Ret.NOx.2  
+- NOx.End.Date.2  
+- Ret.NOx.3  
+- NOx.End.Date.3  
+- Ret.SO2  
+- SO2.End.Date  
+
+
+The following columns contain multiple values that might need to be moved to separate columns:  
+- Stack.Id  
+- Unit.Type   
+- NOx.Control  
+- SO2.Control  
+- Hg.Control  
+- Fuel.Begin.Date  
+- Fuel.End.Date  
+- Primary.Fuel.Type  
+
+
+```{r}
+# check for missing values in EIA data
+sapply(eiadata, function(x) sum(is.na(x)))
+```
+
+**CHP**
+```{r}
+# how many EIA observations have CHP set to Yes
+table(eiadata$CHP)
+```
+
+```{r}
+# how many facilities in CAMD data are CHP facilities
+eiadata %>% filter(CHP == "Y") %>%
+  right_join(data, by = c("Year" = "Op.Year", "Oris.Code" = "Oris.Code")) %>%
+  filter(CHP == "Y") %>% distinct(Oris.Code,Year, .keep_all = TRUE) %>% nrow()
+```
+
+A CHP facility is a combined heat and power (cogeneration facility) that produces electricity and another form of useful thermal energy (such as heat or steam) used for industrial, commercial, heating, or cooling purposes. eGRID describes the adjustment for CHP plants which allocates the emissions between electric and thermal output. The adjustment is applied to the emissions and heat input for the entire plant.  
+
+The methodology is based on multiplying emissions and heat input by an electric allocation factor, which is calculated as follows:  
+1. Calculate the useful thermal output. EIA-923 reports both total fuel consumption and fuel consumption for electricity generation. The useful thermal output value for eGRID2016 data is calculated from EIA-923 data as 0.8 multiplied by the difference in total heat input and electricity heat input in MMBtu. The value of 0.8 is an assumed efficiency factor from the combustion of the consumed fuel.  
+
+$$Useful Thermal Output = 0.8 x (Total Heat Input - Electric Heat Input)$$   
+
+
+2. The electric allocation factor is calculated as the ratio of the electricity heat output to the sum of the electricity and steam heat outputs, where electricity heat output is the net generation in MWh multiplied by 3.413 to convert it to MMBtu, and steam heat output is 0.75 multiplied by the useful thermal output, in MMBtu. The 0.75 factor is another assumed efficiency factor, which accounts for the fact that once fuel is combusted for electricity generation, approximately 75 percent of the useful thermal output can be utilized for other purposes, such as space heating or industrial processes.  
+
+$$Electric Allocation Factor = \frac{3.413 x Net Generation}{(0.75 x Useful Thermal Output) + (3.413 x Net Generation)}$$  
+
+```{r}
+# calculate Useful Thermal Output and Electric Allocation
+ eiadata %>% 
+  mutate(Useful.Thermal.Output = 0.8 * (replace(Total.Fuel.Cons.MMBtu,is.na(Total.Fuel.Cons.MMBtu),0)-replace(Elec.Fuel.Cons.MMBtu,is.na(Elec.Fuel.Cons.MMBtu),0))) %>% 
+  mutate(Electric.Allocation = (3.413 * replace(Annual.Net.Gen,is.na(Annual.Net.Gen),0))/((0.75 * Useful.Thermal.Output) + (3.413 * Annual.Net.Gen))) -> eiadata
+```
+
+```{r}
+# check calculation
+eiadata %>% filter(CHP=="Y" & !is.na(Total.Fuel.Cons.MMBtu)) %>% select(Total.Fuel.Cons.MMBtu,Elec.Fuel.Cons.MMBtu,Useful.Thermal.Output,Annual.Net.Gen,Electric.Allocation) %>% head()
+```
+
+
+```{r}
+# how many units are operating and have Annual.Op.Time > 0 and not NA
+data %>% filter(Op.Status=="OPR" & (!is.na(Annual.Op.Time) & Annual.Op.Time>0)) %>% nrow()
+```
+
+```{r}
+# how many units have Annual.Op.Time = 0 or NA
+data %>% filter(is.na(Annual.Op.Time) | Annual.Op.Time==0) %>% nrow()
+```
+
+```{r}
+# how many units have Annual.Op.Time = NA
+data %>% filter(is.na(Annual.Op.Time)) %>% nrow()
+```
+
+
+
+## Preparing Data ##  
+CAMD data and EIA data will have to be joined in order to replace some of the missing values. However, there are disparities in the datasets which need to be addressed before the datasets can be joined. CAMD's observations are at the unit level, whereas EIA data is at the facility level. An observation in the EIA dataset is unique based on Year, Oris Code, Prime Mover and Fuel Type. Thus Prime Mover and Fuel Type will have to match in the datasets. We will map CAMD values to EIA values.  
+
+For Prime Mover, CAMD data has Unit.Type specifying the boiler type and EIA uses Prime Mover. We need to map CAMD Unit.Type to EIA Prime Mover. **Note:** These are best guesses based on comparison of both data sets.
+
+***Map CAMD Unit.Type to EIA Prime Mover***     	
+CAMD.Unit.Type	<-> EIA Prime Mover  
+AF	<-> ST  
+BFB <-> ST  
+C <-> ST  
+CB <-> ST  
+CC <-> CA,CT  
+CFB <-> ST  
+CT <-> GT  
+DB <-> ST  
+DTF <-> GT or ST??  
+DVF <-> ST  
+ICE <-> IC  
+IGC <-> CA,CT  
+KLN <->   ST??  
+OB <->  ST
+OT <-> ST??  
+PFB <-> ST?? 
+PRH <-> ST??  
+S <-> ST  
+T <-> ST  
+WBF <-> ST  
+WBT <-> ST??  
+WVF <->  ST??  
+
+```{r}
+# create new variable PMmapped with mapped value of Unit.Type
+data %>% mutate(PMmapped = case_when(
+  Unit.Type=="AF" ~ "ST",
+  Unit.Type=="BFB" ~ "ST",
+  Unit.Type=="C" ~ "ST",
+  Unit.Type=="CB" ~ "ST",
+  Unit.Type=="CC" ~ "CA,CT",
+  Unit.Type=="CFB" ~ "ST",
+  Unit.Type=="CT" ~ "GT",
+  Unit.Type=="DB" ~ "ST",
+  Unit.Type=="DTF" ~ "ST",
+  Unit.Type=="DVF" ~ "ST",
+  Unit.Type=="ICE" ~ "IC",
+  Unit.Type=="KLN" ~ "ST",
+  Unit.Type=="OB" ~ "ST",
+  Unit.Type=="OT" ~ "ST",
+  Unit.Type=="PFB" ~ "ST",
+  Unit.Type=="PRH" ~ "ST",
+  Unit.Type=="S" ~ "ST",
+  Unit.Type=="T" ~ "ST",
+  Unit.Type=="WBF" ~ "ST",
+  Unit.Type=="WBT" ~ "ST",
+  Unit.Type=="WVF" ~ "ST"
+)) -> data
+```
+
+```{r}
+# TEST - check mapping
+data %>% filter(Oris.Code==3, Op.Year==2017) %>% select(Unit.Id,Unit.Type,PMmapped)
+```
+
+```{r}
+# split PMmapped values of CA,CT to separate rows (necessary because EIA data has separate values for CA & CT as prime mover)
+data <- separate_rows(data, PMmapped, sep=",")
+```
+
+```{r}
+# TEST - check to make sure data split properly
+data %>% filter(Oris.Code==3, Op.Year==2017) %>% select(Unit.Id,Unit.Type,PMmapped)
+```
+
+***Fuel Type***  
+```{r}
+# CAMD Primary Fuel Types
+table(data$Primary.Fuel.Type)
+```
+CAMD data contains some multiple entries for Primary Fuel Type:  
+Coal, Coal Refuse - 12  
+Coal, Other Gas - 4  
+Coal, Pipeline Natural Gas - 8  
+Diesel Oil, Other Oil - 13  
+Diesel Oil, Pipeline Natural Gas - 26  
+Diesel Oil, Residual Oil - 2  
+Natural Gas, Pipeline Natural Gas - 56  
+Other Gas, Pipeline Natural Gas - 22  
+Other Oil, Petroleum Coke - 5  
+Other Oil, Residual Oil - 7  
+Pipeline Natural Gas, Process Gas - 3  
+Pipeline Natural Gas, Residual Oil - 16  
+
+```{r}
+# EIA Fuel Types
+table(eiadata$Fuel.Type)
+```
+***NOTE:*** EIA Fuel.Type of SC is not listed in eGRID Table C-3. Based on the EIA definition of Coal synfuel(https://www.eia.gov/totalenergy/data/monthly/pdf/sec13.pdf) and the National Renewable Energy Laboratory "Source Energy and Emission Factors for Energy Use in Buildings" (https://www.nrel.gov/docs/fy07osti/38617.pdf), SC will be mapped as Bituminous.  
+```{r}
+# need to make Fuel Type of various coal ranks a separate column (type of coal is needed later) and change those fuel types to Coal
+eiadata %>% mutate(Coal.Rank = case_when(
+  Fuel.Type=="ANT" ~ "ANT",
+  Fuel.Type=="BIT" ~ "BIT",
+  Fuel.Type=="LIG" ~ "LIG",
+  Fuel.Type=="SC" ~ "BIT",
+  Fuel.Type=="SUB" ~ "SUB",
+  TRUE ~ "NA"
+)) -> eiadata
+```
+
+
+```{r}
+# replace ANT,BIT,LIG,SC,SUB in Fuel.Type with "Coal" (this will be needed to match CAMD Fuel with EIA Fuel)
+eiadata$Fuel.Type[eiadata$Fuel.Type %in% c("ANT","BIT","LIG","SC","SUB")] <- "Coal"
+```
+
+```{r}
+# TEST - check replacement
+eiadata%>% filter(Oris.Code==3) %>% select(Year,Prime.Mover,Fuel.Type,Coal.Rank) %>% head()
+```
+
+
+***Map CAMD Fuel Type to EIA Fuel Type***  
+*Note: For those with multiple values, the first value will be used. These values can also be split into separate observations for each fuel type*  
+CAMD Primary.Fuel.Type	<-> EIA Fuel Type Code  
+Coal	<-> Coal  
+Coal Refuse	<-> WC (Waste Coal)  
+Coal,CoalRefuse <-> Coal  
+Coal,Other Gas <-> Coal  
+Coal,Pipeline Natural Gas <-> Coal  
+Diesel Oil	<-> DFO  
+Diesel Oil,Other Oil <-> DFO  
+Diesel Oil,Pipeline Natural Gas <-> DFO  
+Diesel Oil,Residual Oil <-> DFO  
+Natural Gas	<-> NG  
+Natural Gas,Pipeline Natural Gas <-> NG  
+Other Gas	<-> OG  
+Other Gas,Pipeline Natural Gas <-> OG  
+Other Oil	<-> WO  
+Other Oil,Petroleum Coke <-> WO  
+Other Oil,Residual Oil <-> WO  
+Other Solid Fuel <-> WDS  
+Petroleum Coke	<-> PC  
+Pipeline Natural Gas	<-> NG  
+Pipeline Natural Gas,Process Gas <-> NG  
+Pipeline Natural Gas,Residual Oil <-> NG
+Process Gas	<-> PRG  
+Residual Oil	<-> RFO  
+Tire Derived Fuel	<-> TDF  
+Wood	<-> WDS  
+
+```{r}
+# create column for mapping of CAMD Fuel Type to EIA Fuel Type
+data %>% mutate(Fuel.Mapping = case_when(
+  Primary.Fuel.Type=="Coal" ~ "Coal",
+  Primary.Fuel.Type=="Coal Refuse" ~ "WC",
+  Primary.Fuel.Type=="Coal,Coal Refuse" ~ "Coal",
+  Primary.Fuel.Type=="Coal,Other Gas" ~ "Coal",
+  Primary.Fuel.Type=="Coal,Pipeline Natural Gas" ~ "Coal",
+  Primary.Fuel.Type=="Diesel Oil" ~ "DFO",
+  Primary.Fuel.Type=="Diesel Oil,Other Oil" ~ "DFO",
+  Primary.Fuel.Type=="Diesel Oil,Pipeline Natural Gas" ~ "DFO",
+  Primary.Fuel.Type=="Diesel Oil,Residual Oil" ~ "DFO",
+  Primary.Fuel.Type=="Natural Gas" ~ "NG",
+  Primary.Fuel.Type=="Natural Gas,Pipeline Natural Gas" ~ "NG",
+  Primary.Fuel.Type=="Other Gas" ~ "OG",
+  Primary.Fuel.Type=="Other Gas,Pipeline Natural Gas" ~ "OG",
+  Primary.Fuel.Type=="Other Oil" ~ "WO",
+  Primary.Fuel.Type=="Other Oil,Petroleum Coke" ~ "WO",
+  Primary.Fuel.Type=="Other Oil,Residual Oil" ~ "WO",
+  Primary.Fuel.Type=="Other Solid Fuel" ~ "WDS",
+  Primary.Fuel.Type=="Petroleum Coke" ~ "PC",
+  Primary.Fuel.Type=="Pipeline Natural Gas" ~ "NG",
+  Primary.Fuel.Type=="Pipeline Natural Gas,Process Gas" ~ "NG",
+  Primary.Fuel.Type=="Pipeline Natural Gas,Residual Oil" ~ "NG",
+  Primary.Fuel.Type=="Process Gas" ~ "PRG",
+  Primary.Fuel.Type=="Residual Oil" ~ "RFO",
+  Primary.Fuel.Type=="Tire Derived Fuel" ~ "TDF",
+  Primary.Fuel.Type=="Wood" ~ "WDS"
+)
+) -> data
+```
+
+```{r}
+# TEST: check that values mapped correctly 
+data %>% select(Oris.Code, Op.Year, Primary.Fuel.Type, Fuel.Mapping) %>% head(n=10)
+```
+
+**Combine CAMD and EIA data**
+```{r}
+# join EIA data to add prime mover and total heat input data for each plant 
+CAMD_EIA_join <- left_join(data, eiadata, by = c("Oris.Code"="Oris.Code", "Op.Year" = "Year", "PMmapped" = "Prime.Mover", "Fuel.Mapping"="Fuel.Type"))
+```
+
+```{r}
+# TEST: look at joined data
+CAMD_EIA_join %>% filter(Oris.Code==3 & Op.Year==2017) %>% select(Unit.Id,Unit.Type, PMmapped, Fuel.Mapping)
+```
+
+Replace Fuel.Mapping for Coal with Coal.Rank so we can remove the Coal.Rank column
+```{r}
+# when value in Fuel.Mapping is coal, replace with coal rank, otherwise keep value in Fuel.Mapping
+CAMD_EIA_join %>% mutate(Fuel.Mapping = case_when(
+  Fuel.Mapping=="Coal" ~ Coal.Rank,
+  TRUE ~ .$Fuel.Mapping
+)) -> CAMD_EIA_join
+```
+
+
+```{r}
+# TEST: check that values mapped correctly
+CAMD_EIA_join %>% 
+  filter(Oris.Code==3, Op.Year==2017) %>% 
+  select(Unit.Id,Primary.Fuel.Type, Fuel.Mapping, Coal.Rank,PMmapped) 
+```
+
+```{r}
+# remove Coal.Rank column
+CAMD_EIA_join$Coal.Rank <- NULL
+```
+
+
+# Fill in Data Gaps for SO2, NOx, and CO2 mass #  
+Fill in data gaps for SO2, NOx, and CO2 mass using the methodologies described in the eGRID 2016 TSD and include a source flag for each value to indicate whether it was from CAMD data or calculated. 
+
+For each of these pollutants, the calculation to fill in data gaps relies on Heat Input. The CAMD data has over 4000 observations missing heat input so that will be addressed first.
+
+
+## Heat Input Data Gaps ##  
+```{r}
+# how many observations are missing heat input
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all = TRUE) %>%  # distinct values based on unit (some now have multiple observations due to join)
+  filter(is.na(Annual.HI)) %>% nrow()
+```
+
+
+```{r}
+# how many observations are missing heat input and are operating
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all = TRUE) %>% # distinct values based on unit (some now have multiple observations due to join)
+  filter(is.na(Annual.HI) & Op.Status=="OPR") %>% nrow()
+```
+
+```{r}
+# how many observations are missing heat input, are operating and annual op time is greater than zero
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all = TRUE) %>% # distinct values based on unit (some now have multiple observations due to join)
+  filter(is.na(Annual.HI) & Op.Status=="OPR" & Annual.Op.Time>0) %>% nrow()
+```
+
+```{r}
+# how many observations are missing heat input, are operating and annual op time is NA
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all = TRUE) %>% # distinct values based on unit (some now have multiple observations due to join)
+  filter(is.na(Annual.HI) & Op.Status=="OPR" & is.na(Annual.Op.Time)) %>% nrow()
+```
+
+
+
+For missing heat input, eGRID 2016 TSD states "for units that report to EIA at the plant level, we distribute prime mover-level heat input to each unit based on that unit's proportion of nameplate capacity."   
+
+```{r}
+# get Total Nameplate Capacity per Prime Mover and Percentage of Nameplate Capacity per prime mover per unit
+CAMD_EIA_join %>% 
+  group_by(Op.Year,Oris.Code,PMmapped) %>% 
+  distinct(Unit.Id, .keep_all = TRUE) %>%  
+  mutate(Nameplate.Cap.per.PM = sum(Nameplate.Capacity),
+         Pct.Nameplate.Cap = Nameplate.Capacity/Nameplate.Cap.per.PM) %>% 
+  ungroup() -> CAMD_EIA_join
+```
+
+
+```{r}
+# TEST: check nameplate capacity computation
+CAMD_EIA_join %>% 
+  select(Op.Year,Oris.Code,Unit.Id,PMmapped,Nameplate.Capacity,Nameplate.Cap.per.PM,Pct.Nameplate.Cap) %>% head()
+```
+
+EIA Total Fuel Consumed (Annual HI) is shown by Year, Oris.Code, Prime.Mover and Fuel.Type
+```{r}
+eiadata %>% filter(Year==2000,Oris.Code==3) %>% select(Year,Oris.Code,Prime.Mover,Fuel.Type,Total.Fuel.Cons.MMBtu)
+```
+
+
+Fill in missing heat input values using percentage of nameplate capacity per prime mover * total plant heat input
+```{r}
+# fill in missing heat input values with percentage of nameplate capacity per PM * total plant heat input
+CAMD_EIA_join %>% 
+  group_by(Op.Year,Oris.Code,PMmapped) %>%
+  mutate(calc.Annual.HI = Pct.Nameplate.Cap * Total.Fuel.Cons.MMBtu) %>%
+  ungroup() -> CAMD_EIA_join
+```
+
+```{r}
+# TEST: check computed values
+CAMD_EIA_join %>% filter(Op.Year==2017 & is.na(Annual.HI) & !is.na(calc.Annual.HI) & Total.Fuel.Cons.MMBtu > 0) %>% 
+  select(Op.Year,Oris.Code,Unit.Id,PMmapped,Pct.Nameplate.Cap,Total.Fuel.Cons.MMBtu,calc.Annual.HI,Annual.HI) %>% head()
+```
+
+
+```{r}
+# fill missing heat input values with percentage of nameplate capacity *  Total plant heat input
+# change HI data source to calculated
+CAMD_EIA_join$HI.data.source[is.na(CAMD_EIA_join$Annual.HI)] <- "Calculated"
+
+# for observations with missing Annual HI replace it with calculated Heat Input
+CAMD_EIA_join$Annual.HI[is.na(CAMD_EIA_join$Annual.HI)] <-  CAMD_EIA_join$calc.Annual.HI[is.na(CAMD_EIA_join$Annual.HI)]
+
+# if Annual heat input wasn't filled in with calculated value, replace HI data source with NA
+CAMD_EIA_join$HI.data.source[is.na(CAMD_EIA_join$Annual.HI)] <- NA
+```
+
+```{r}
+# TEST: check to make sure above is correct
+CAMD_EIA_join %>% filter(Op.Year==2017 & HI.data.source=="Calculated" & calc.Annual.HI > 0) %>% select(c("Unit.Id","Annual.HI","HI.data.source","calc.Annual.HI")) %>% head()
+```
+
+```{r}
+# how many observations are still missing heat input
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all = TRUE) %>%  # distinct values based on unit (some now have multiple observations due to join)
+  filter(is.na(Annual.HI)) %>% nrow()
+```
+
+
+```{r}
+# how many observations are missing heat input and are operating
+CAMD_EIA_join %>%
+  distinct(idx, .keep_all = TRUE) %>%
+  filter(is.na(Annual.HI) & Op.Status=="OPR") %>% nrow()
+```
+
+
+```{r}
+# how many observations are missing heat input, are operating and annual op time is greater than zero
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all = TRUE) %>% # distinct values based on unit (some now have multiple observations due to join)
+  filter(is.na(Annual.HI) & Op.Status=="OPR" & Annual.Op.Time>0) %>% nrow()
+```
+
+```{r}
+# how many observations are missing heat input, are operating and annual op time is NA
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all = TRUE) %>% # distinct values based on unit (some now have multiple observations due to join)
+  filter(is.na(Annual.HI) & Op.Status=="OPR" & is.na(Annual.Op.Time)) %>% nrow()
+```
+
+```{r}
+# how many are missing Total.Fuel.Cons.MMBtu or Nameplate Capacity
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%
+  filter(is.na(Annual.HI) & Annual.Op.Time>0 & Op.Status=="OPR" & (is.na(Total.Fuel.Cons.MMBtu) | is.na(Nameplate.Capacity))) %>% nrow()
+```
+
+*Heat Input Data Gaps Summary*  
+Prior to imputing heat input values,  
+- 3354 units with a status of operating were missing heat input
+- 569 units with a status of operating and an operating time > 0 were missing heat input    
+
+
+After imputation,
+- 1729 units with a status of operating are missing heat input  
+- 375 units with a status of operating and an operating time > 0 are missing heat input  
+- 374 units with a status of operating and an operating time > 0 are missing heat input, and total fuel consumed or nameplate capacity (the two variables used to compute heat input)
+
+
+## SO2 Data Gaps ##
+From eGRID TSD 2016:  
+SO2 emissions are based on heat input multiplied by an emission factor. 
+
+EIA does not report unit-level emissions rates for SO2. Therefore, the SO2 emissions for all non-EPA/CAMD units are estimated using emission factors from EPA's AP-42, which are specific to fuel, prime mover, and in the case of boilers, boiler type. For some fuels, such as coal and oil, the emission factor from AP-42 depend on the sulfur content of the fuel. For many units, EIA reports monthly unit-level data on the sulfur content of the fuel consumed, and these data are used with the AP-42 emission factors to estimate SO2 emissions. For units without unit-level data on the sulfur content of fuels, the sulfur content is based on an average of the reported sulfur contents for units that have the same prime mover and fuel type. See Table C-3 in eGRID 2016 TSD Appendix C.  
+
+Look at units with missing Annual.SO2.mass.
+```{r}
+# how many observations are missing Annual SO2 mass
+CAMD_EIA_join %>%
+  distinct(idx, .keep_all=TRUE) %>%  # distinct values based on unit (some now have multiple observations because of PM)
+  filter(is.na(Annual.SO2.mass)) %>% nrow()
+```
+
+```{r}
+# how many are missing Annual SO2 mass and are operating
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%  # distinct values based on unit (some now have multiple observations because of PM) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR") %>% nrow()
+```
+
+
+```{r}
+# how many are missing Annual SO2 mass, are operating and annual operating time > 0
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%  # distinct values based on unit (some now have multiple observations because of PM) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0) %>% nrow()
+```
+
+
+```{r}
+# how many are missing Annual SO2 mass, are operating with an annual operating time > 0 and missing heat input
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%  # distinct values based on unit (some now have multiple observations because of PM) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0 & is.na(Annual.HI)) %>% nrow()
+```
+
+```{r}
+# how many are missing Annual SO2 mass, are operating with an annual operating time > 0 and are missing Fuel Type
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%  # distinct values based on unit (some now have multiple observations because of PM) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0 & is.na(Fuel.Mapping)) %>% nrow()
+```
+
+```{r}
+# how many are missing Annual SO2 mass, are operating with an annual operating time > 0 and are missing PM
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%  # distinct values based on unit (some now have multiple observations because of PM) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0 & is.na(PMmapped)) %>% nrow()
+```
+
+```{r}
+# how many are missing Annual SO2 mass, are operating with an annual operating time > 0 and are missing sulfur
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%  # distinct values based on unit (some now have multiple observations because of PM) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0 & ((Fuel.Mapping %in% c("BIT","JF","LIG","PC","RC","SGC","SGP","SUB","TDF","WC")) | (Fuel.Mapping=="DFO" & PMmapped!="IC") | (Fuel.Mapping=="RFO" & PMmapped != "IC") | (Fuel.Mapping=="WO" & PMmapped != "IC")) & is.na(Annual.Avg.Sulfur.Content)) %>% nrow()
+```
+
+
+
+We need to map CAMD Unit Type to EIA Boiler Firing Type. The below are best-guess mappings.    
+
+
+*Map CAMD Unit Type to EIA Boiler Firing Type*    
+CAMD Unit.Type <-> EIA Boiler.Firing.Type  
+AF <-> OTHER  
+BFB <-> FLUIDIZED  
+C <-> CYCLONE  
+CB <-> DRY WALL  
+CB,DB <-> DRY WALL  
+CC <-> OTHER  
+CC,CT <-> OTHER  
+CFB <-> FLUIDIZED  
+CT <-> OTHER  
+CT,CC <-> OTHER  
+CT,IGC <-> OTHER  
+DB <-> DRY WALL  
+DB,CB <-> DRY WALL  
+DB,CFB <-> DRY WALL  
+DB,S <-> DRY WALL  
+DTF <-> OTHER  
+DVF <-> DRY VERTICAL  
+ICE <-> OTHER  
+IGC <-> OTHER  
+KLN <-> OTHER  
+OB <-> OTHER  
+OB,DVF <-> DRY VERTICAL  
+OT <-> OTHER  
+PFB <-> FLUIDIZED  
+PRH <-> OTHER  
+S <-> STOKER  
+S,DB <->  STOKER  
+T <-> TANGENTIAL  
+WBF <-> WET WALL  
+WBT <-> WET OTHER  
+WVF <-> WET VERTICAL
+
+```{r}
+# create column for mapping of CAMD Unit Type to EIA Boiler Firing Type
+CAMD_EIA_join %>% mutate(Boiler.Mapping =  case_when(
+  Unit.Type=="AF" ~ "OTHER",
+  Unit.Type=="BFB" ~ "FLUIDIZED",
+  Unit.Type=="C" ~ "CYCLONE",
+  Unit.Type=="CB" ~ "DRY WALL",
+  Unit.Type=="CB,DB" ~ "DRY WALL",
+  Unit.Type=="CC" ~ "OTHER",
+  Unit.Type=="CC,CT" ~ "OTHER",
+  Unit.Type=="CFB" ~ "FLUIDIZED",
+  Unit.Type=="CT" ~ "OTHER",
+  Unit.Type=="CT,CC" ~ "OTHER",
+  Unit.Type=="CT,IGC" ~ "OTHER",
+  Unit.Type=="DB" ~ "DRY WALL",
+  Unit.Type=="DB,CB" ~ "DRY WALL",
+  Unit.Type=="DB,CFB" ~ "DRY WALL",
+  Unit.Type=="DB,S" ~ "DRY WALL",
+  Unit.Type=="DTF" ~ "OTHER",
+  Unit.Type=="DVF" ~ "DRY VERTICAL",
+  Unit.Type=="ICE" ~ "OTHER",
+  Unit.Type=="IGC" ~ "OTHER",
+  Unit.Type=="KLN" ~ "OTHER",
+  Unit.Type=="OB" ~ "OTHER",
+  Unit.Type=="OB,DVF" ~ "DRY VERTICAL",
+  Unit.Type=="OT" ~ "OTHER",
+  Unit.Type=="PFB" ~ "FLUIDIZED",
+  Unit.Type=="PRH" ~ "OTHER",
+  Unit.Type=="S" ~ "STOKER",
+  Unit.Type=="S,DB" ~ "STOKER",
+  Unit.Type=="T" ~ "TANGENTIAL",
+  Unit.Type=="WBF" ~ "WET WALL",
+  Unit.Type=="WBT" ~ "WET OTHER",
+  Unit.Type=="WVF" ~ "WET VERTICAL"
+)
+) -> CAMD_EIA_join
+```
+
+```{r}
+# TEST: check that values mapped correctly
+CAMD_EIA_join %>% select(Oris.Code, Op.Year, Unit.Type, Boiler.Mapping) %>% head()
+```
+
+
+### Missing Sulfur Content ###  
+From eGRID, "For units without unit-level data on the sulfur content of fuels, the sulfur content is based on an average of the reported sulfur contents for units that have the same prime mover and fuel type." 
+```{r}
+# how many which require sulfur content for calculation are missing Sulfur Content 
+CAMD_EIA_join %>%
+  distinct(idx, .keep_all=TRUE) %>%
+  filter((Fuel.Mapping %in% c("BIT","JF","LIG","PC","RC","SGC","SGP","SUB","TDF","WC") | (Fuel.Mapping=="DFO" & PMmapped!="IC") | (Fuel.Mapping=="RFO" & PMmapped != "IC") | (Fuel.Mapping=="WO" & PMmapped != "IC")) & is.na(Annual.Avg.Sulfur.Content)) %>% nrow()
+```
+
+
+From eGRID, "For units without unit-level data on the sulfur content of fuels, the sulfur content is based on an average of the reported sulfur contents for units that have the same prime mover and fuel type.  
+```{r}
+# create Avg Sulfur Content column by taking mean value of the reported sulfur contents for units that have the same prime mover and fuel type 
+CAMD_EIA_join %>% 
+  group_by(PMmapped,Fuel.Mapping) %>% 
+  distinct(idx, .keep_all = TRUE) %>% 
+  mutate(Avg.Sulfur.Content.Calc = mean(Annual.Avg.Sulfur.Content, na.rm = TRUE)) %>%
+  ungroup() -> CAMD_EIA_join
+```
+
+```{r}
+# TEST: check Avg. Sulfur Content was added
+CAMD_EIA_join %>% filter(Op.Year==2017 & is.na(Annual.Avg.Sulfur.Content)) %>% select(Op.Year,Oris.Code,Unit.Id,PMmapped,Fuel.Mapping,Annual.Avg.Sulfur.Content,Avg.Sulfur.Content.Calc) 
+```
+
+```{r}
+# how many are missing value for Avg.Sulfur.Content.Calc
+CAMD_EIA_join %>%
+  distinct(idx, .keep_all=TRUE) %>%
+  filter(is.na(Annual.Avg.Sulfur.Content) & is.na(Avg.Sulfur.Content.Calc) & ((Fuel.Mapping %in% c("BIT","JF","LIG","PC","RC","SGC","SGP","SUB","TDF","WC")) | (Fuel.Mapping=="DFO" & PMmapped!="IC") | (Fuel.Mapping=="RFO" & PMmapped != "IC") | (Fuel.Mapping=="WO" & PMmapped != "IC")) & is.na(Annual.Avg.Sulfur.Content)) %>% nrow()
+```
+
+
+```{r}
+# if sulfur content is missing, replace with avg.sulfur.content.calc
+# create column for Sulfur.data.source and populate with EIA-923 or calculated
+CAMD_EIA_join %>% mutate(Sulfur.data.source = case_when(
+  !is.na(Annual.Avg.Sulfur.Content) ~ "EIA-923",
+  TRUE ~ "Calculated"
+)) -> CAMD_EIA_join
+
+# for observations with missing Sulfur Content replace it with average sulfur content calculated above
+CAMD_EIA_join$Annual.Avg.Sulfur.Content[is.na(CAMD_EIA_join$Annual.Avg.Sulfur.Content)] <-  CAMD_EIA_join$Avg.Sulfur.Content.Calc[is.na(CAMD_EIA_join$Annual.Avg.Sulfur.Content)]
+
+# if sulfur content wasn't filled in with calculated value, replace Sulfur data source with NA
+CAMD_EIA_join$Sulfur.data.source[is.na(CAMD_EIA_join$Annual.Avg.Sulfur.Content)] <- NA
+```
+
+```{r}
+# TEST: check to make sure Sulfur.Content was replaced by Avg Sulfur Content Calc
+CAMD_EIA_join %>% filter(Op.Year==2017 & Sulfur.data.source=="Calculated") %>% select(Op.Year,Oris.Code,PMmapped,Fuel.Mapping,Annual.Avg.Sulfur.Content,Sulfur.data.source,Avg.Sulfur.Content.Calc) %>% head()
+```
+
+
+```{r}
+# how many which require sulfur content for calculation are missing Sulfur Content and missing SO2 mass,
+# are operating and have an annual operating time > 0
+CAMD_EIA_join %>%
+  distinct(idx, .keep_all=TRUE) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0 & ((Fuel.Mapping %in% c("BIT","JF","LIG","PC","RC","SGC","SGP","SUB","TDF","WC")) | (Fuel.Mapping=="DFO" & PMmapped!="IC") | (Fuel.Mapping=="RFO" & PMmapped != "IC") | (Fuel.Mapping=="WO" & PMmapped != "IC"))  & is.na(Annual.Avg.Sulfur.Content)) %>% nrow()
+```
+
+Below are the values that were not calculated due to no values to calculate the average for that combination of Prime Mover and Fuel Type. These values can be set individually if appropriate values are determined for each combination.
+```{r}
+CAMD_EIA_join %>%
+  distinct(idx, .keep_all=TRUE) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0 & ((Fuel.Mapping %in% c("BIT","JF","LIG","PC","RC","SGC","SGP","SUB","TDF","WC")) | (Fuel.Mapping=="DFO" & PMmapped!="IC") | (Fuel.Mapping=="RFO" & PMmapped != "IC") | (Fuel.Mapping=="WO" & PMmapped != "IC"))  & is.na(Annual.Avg.Sulfur.Content)) %>% group_by(PMmapped,Fuel.Mapping) %>% summarize(count = n())
+```
+
+
+*Missing Sulfur Summary*  
+There were 3546 units with an operating status of Operating and an annual operating time > 0 with missing values for Annual SO2 Mass and average sulfur content (where sulfur content will be needed to calculate Annual SO2 Mass). After imputation of average sulfur content, 504 of these units are still missing average sulfur content. 492 of those are for units with prime mover GT and WO for fuel. 12 have a prime mover of ST and a fuel of TDF.
+
+
+Calculate Annual SO2 mass using eGRID Emission Factor (Table C-3)
+```{r}
+# create column for Annual SO2 mass calculation 
+CAMD_EIA_join %>% 
+  mutate(Annual.SO2.mass.calc = case_when(
+    Fuel.Mapping=="AB" ~ Annual.HI * 0.025,
+    Fuel.Mapping=="BFG" ~ Annual.HI * 0.0006,
+    Fuel.Mapping=="BIT" ~ Annual.HI * (38*Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="BLQ" & Boiler.Mapping=="DRY FLUIDIZED" ~ Annual.HI * 0.7,
+    Fuel.Mapping=="BLQ" ~ Annual.HI *  7,
+    Fuel.Mapping=="DFO" & PMmapped=="ST" & (Boiler.Mapping=="DRY WALL" | Boiler.Mapping=="WET TANGENTIAL" | Boiler.Mapping=="DRY TANGENTIAL")
+    ~ Annual.HI * (6.3*Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="DFO" & PMmapped=="ST" ~ Annual.HI * (5.964*Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="DFO" & PMmapped=="IC" ~ Annual.HI * 0.29,
+    Fuel.Mapping=="DFO" ~ Annual.HI * (1.01 * Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="JF" ~ Annual.HI * (1.01 * Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="KER"  ~ Annual.HI * (1.01 *  Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="LFG" & PMmapped=="ST" ~  Annual.HI * 0.0006,
+    Fuel.Mapping=="LFG" ~ Annual.HI * 0.045,
+    Fuel.Mapping=="LIG" & (Boiler.Mapping=="FLUIDIZED" | Boiler.Mapping=="WET FLUIDIZED") ~ Annual.HI * (10 * Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="LIG" ~  Annual.HI * (30 * Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="MSB" ~ Annual.HI * 1.7,
+    Fuel.Mapping=="MSW" ~ Annual.HI * 1.7,
+    Fuel.Mapping=="NG" ~ Annual.HI * 0.0006,
+    Fuel.Mapping=="OBG" ~ Annual.HI * 0.0065,
+    Fuel.Mapping=="OBL" ~ Annual.HI * 0.0065,
+    Fuel.Mapping=="OBS" ~ Annual.HI * 0.025,
+    Fuel.Mapping=="OG" & PMmapped=="IC" ~ Annual.HI * 0.000588,
+    Fuel.Mapping=="OG" ~ Annual.HI * 0.0006,
+    Fuel.Mapping=="PC" ~ Annual.HI *  (0.362 * Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="PG" ~ Annual.HI * 0.0006,
+    Fuel.Mapping=="PRG" ~ Annual.HI * 0.0006,
+    Fuel.Mapping=="RC" ~ Annual.HI * (38 * Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="RFO" & PMmapped=="IC" ~ Annual.HI * 0.29,
+    Fuel.Mapping=="RFO" & PMmapped=="ST" ~ Annual.HI * (6.594 * Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="RFO" ~ Annual.HI * (1.01 * Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="SGC" ~  Annual.HI * (38 * Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="SGP" ~ Annual.HI * (0.362 * Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="SUB" ~ Annual.HI * (35 * Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="TDF" ~ Annual.HI * (38 * Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="WC" ~ Annual.HI * (30 * Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="WDL" ~ Annual.HI * 0.025,
+    Fuel.Mapping=="WDS" ~ Annual.HI * 0.025,
+    Fuel.Mapping=="WO" & PMmapped=="IC" ~ Annual.HI * 0.29,
+    Fuel.Mapping=="WO" & PMmapped=="ST" ~ Annual.HI * (6.174 * Annual.Avg.Sulfur.Content),
+    Fuel.Mapping=="WO"  ~ Annual.HI  * (1.01 * Annual.Avg.Sulfur.Content)
+)
+) -> CAMD_EIA_join
+  
+  
+```
+
+
+```{r}
+# replace missing Annual SO2 mass with calculated SO2 mass
+# change SO2 mass data source to calculated
+CAMD_EIA_join$SO2.mass.data.source[is.na(CAMD_EIA_join$Annual.SO2.mass)] <- "Calculated"
+
+# for observations with missing SO2 mass replace it with SO2 calculated mass
+CAMD_EIA_join$Annual.SO2.mass[is.na(CAMD_EIA_join$Annual.SO2.mass)] <-  CAMD_EIA_join$Annual.SO2.mass.calc[is.na(CAMD_EIA_join$Annual.SO2.mass)]
+
+# if Annual SO2 mass data source wasn't filled in with calculated value, replace SO2 mass data source with NA
+CAMD_EIA_join$SO2.mass.data.source[is.na(CAMD_EIA_join$Annual.SO2.mass)] <- NA
+```
+
+
+```{r}
+# TEST: check to make sure calculation is correct
+CAMD_EIA_join %>% filter(Oris.Code==47 & Op.Year==2003) %>% select(c("idx","Op.Year","Oris.Code","Annual.SO2.mass","Annual.SO2.mass.calc","SO2.mass.data.source","Annual.HI","HI.data.source", "PMmapped","Fuel.Mapping","Boiler.Mapping","Annual.Avg.Sulfur.Content"))
+```
+
+
+```{r}
+# how many observations are still missing SO2 mass
+CAMD_EIA_join %>%
+  distinct(idx, .keep_all=TRUE) %>%  # distinct values based on unit (some now have multiple observations because of PM)
+  filter(is.na(Annual.SO2.mass)) %>% nrow()
+```
+
+```{r}
+# how many are missing Annual SO2 mass and are operating
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%  # distinct values based on unit (some now have multiple observations because of PM) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR") %>% nrow()
+```
+
+
+```{r}
+# how many are missing Annual SO2 mass, are operating and annual operating time > 0
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%  # distinct values based on unit (some now have multiple observations because of PM) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0) %>% nrow()
+```
+
+
+```{r}
+# how many are missing Annual SO2 mass, are operating with an annual operating time > 0 and missing heat input
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%  # distinct values based on unit (some now have multiple observations because of PM) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0 & is.na(Annual.HI)) %>% nrow()
+```
+
+```{r}
+# how many are missing Annual SO2 mass, are operating with an annual operating time > 0 and are missing Fuel Type
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%  # distinct values based on unit (some now have multiple observations because of PM) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0 & is.na(Fuel.Mapping)) %>% nrow()
+```
+
+```{r}
+# how many are missing Annual SO2 mass, are operating with an annual operating time > 0 and are missing Prime Mover
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%  # distinct values based on unit (some now have multiple observations because of PM) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0 & is.na(PMmapped)) %>% nrow()
+```
+
+```{r}
+# how many of these are missing Boiler Mapping
+CAMD_EIA_join %>%
+  distinct(idx, .keep_all = TRUE) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0 & is.na(Boiler.Mapping)) %>% nrow()
+```
+
+```{r}
+# how many are missing Annual SO2 mass, are operating with an annual operating time > 0 and are missing sulfur
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%  # distinct values based on unit (some now have multiple observations because of PM) %>%
+  filter(is.na(Annual.SO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0 & ((Fuel.Mapping %in% c("BIT","JF","LIG","PC","RC","SGC","SGP","SUB","TDF","WC")) | (Fuel.Mapping=="DFO" & PMmapped!="IC") | (Fuel.Mapping=="RFO" & PMmapped != "IC") | (Fuel.Mapping=="WO" & PMmapped != "IC")) & is.na(Annual.Avg.Sulfur.Content)) %>% nrow()
+```
+
+*Annual SO2 Mass Data Gaps Summary*  
+Initially, 10443 units which were operating and had an annual operating time greater than 0 were missing Annual SO2 mass. After imputation, 1147 units which were operating and had an annual operating time greater than 0 are still missing Annual SO2 mass. Of those, 359 are missing heat input, 446 are missing fuel type, and 504 are missing sulfur content (where sulfur content is required in the calculation).
+
+
+
+## NOx Data Gaps## 
+Look at observations with missing Annual.NOx.mass.
+```{r}
+# how many are missing annual NOx mass
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%    # make observations distinct by index as there might be many rows per unit
+  filter(is.na(Annual.NOx.mass)) %>% nrow()
+```
+
+
+```{r}
+# how many are missing annual NOx mass and are operating
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>% 
+  filter(is.na(Annual.NOx.mass) & Op.Status=="OPR") %>% nrow()
+```
+
+```{r}
+# how many are missing annual NOx mass, are operating, and annual op time > 0
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>% 
+  filter(is.na(Annual.NOx.mass) & Op.Status=="OPR" & Annual.Op.Time>0) %>% nrow()
+```
+
+
+
+
+
+**Address gaps in Annual NOx emissions**
+From eGrid TSD 2016:  
+NOx emissions are based on heat input multiplied by an emission factor. For some units, EIA reports unit-level NOx emission rates (lb/MMBtu) for both annual and ozone season emissions, from EIA FORM 923 Schedule 8C. These unit-level emission rates are multiplied by the unit-level heat input used to estimate annual and ozone season NOx emissions. For all other units that report to EIA but do not report to CAMD, the unit-level heat input is multiplied by a prime mover - and fuel-specific emission factor from EPA's AP-42 Compliance of Air Pollutant Emission Factors.
+
+For NOx, we need Prime Mover, Primary Fuel Type and Boiler type. We have already mapped these to EIA values. 
+
+
+Calculate Annual NOx mass using eGRID Emission Factor (Table C-2)
+```{r}
+# fill in missing NOx annual emissions
+CAMD_EIA_join %>% mutate(Annual.NOx.mass.calc = case_when(
+    Fuel.Mapping=="AB" ~ Annual.HI * 1.2,
+    Fuel.Mapping=="BFG" ~ Annual.HI * 0.0154,
+    Fuel.Mapping=="BIT" & (Boiler.Mapping=="DRY FLUIDIZED" | Boiler.Mapping=="FLUIDIZED" | Boiler.Mapping=="WET FLUIDIZED") ~ Annual.HI * 5,
+    Fuel.Mapping=="BIT"  & (Boiler.Mapping=="DRY TANGENTIAL" | Boiler.Mapping=="TANGENTIAL") ~ Annual.HI *  10,
+    Fuel.Mapping=="BIT" & (Boiler.Mapping=="DRY STOKER" | Boiler.Mapping=="STOKER") ~ Annual.HI * 11,
+    Fuel.Mapping=="BIT" & (Boiler.Mapping=="DRY VERTICAL" | Boiler.Mapping=="DRY WALL" | Boiler.Mapping=="N/A" | Boiler.Mapping=="OTHER") ~ Annual.HI * 12,
+    Fuel.Mapping=="BIT" & Boiler.Mapping=="WET TANGENTIAL" ~ Annual.HI * 14,
+    Fuel.Mapping=="BIT" & (Boiler.Mapping=="WET OTHER" | Boiler.Mapping=="WET VERTICAL" | Boiler.Mapping=="WET WALL") ~ Annual.HI * 31,
+    Fuel.Mapping=="BIT" & (Boiler.Mapping=="CYCLONE" | Boiler.Mapping=="DRY CYCLONE" | Boiler.Mapping=="WET CYCLONE") ~ Annual.HI * 33,
+    Fuel.Mapping=="BLQ" ~ Annual.HI * 1.5,
+    Fuel.Mapping=="DFO" & PMmapped=="IC" ~ Annual.HI * 18.6396,
+    Fuel.Mapping=="DFO" & PMmapped=="ST" ~ Annual.HI * 1.008,
+    Fuel.Mapping=="DFO" ~ Annual.HI * 5.124,
+    Fuel.Mapping=="JF" & PMmapped=="IC" ~ Annual.HI * 18.144,
+    Fuel.Mapping=="JF" & PMmapped=="ST" ~ Annual.HI * 1.008,
+    Fuel.Mapping=="JF" & PMmapped=="GT" ~ Annual.HI * 4.9896,
+    Fuel.Mapping=="KER" ~ Annual.HI * 4.9896,
+    Fuel.Mapping=="LFG" & PMmapped=="IC" ~ Annual.HI * 1.21522,
+    Fuel.Mapping=="LFG" & PMmapped=="ST" ~ Annual.HI * 0.07244,
+    Fuel.Mapping=="LFG" ~ Annual.HI * 0.144,
+    Fuel.Mapping=="LIG" & Boiler.Mapping=="WET CYCLONE" ~ Annual.HI * 15,
+    Fuel.Mapping=="LIG" & Boiler.Mapping=="DRY WALL" ~ Annual.HI * 6.3,
+    Fuel.Mapping=="LIG" & (Boiler.Mapping=="DRY TANGENTIAL" | Boiler.Mapping=="TANGENTIAL") ~ Annual.HI * 7.1,
+    Fuel.Mapping=="LIG" ~ Annual.HI * 3.6,
+    Fuel.Mapping=="MSB" ~ Annual.HI * 5,
+    Fuel.Mapping=="MSW" ~ Annual.HI * 5,
+    Fuel.Mapping=="NG" & PMmapped=="IC" ~ Annual.HI * 2.768,
+    Fuel.Mapping=="NG" & PMmapped=="ST" & (Boiler.Mapping=="DRY DUCTBURNER" | Boiler.Mapping=="DRY TANGENTIAL" | Boiler.Mapping=="DUCTBURNER" | Boiler.Mapping=="TANGENTIAL" | Boiler.Mapping=="OTHER" | Boiler.Mapping=="N/A") ~ Annual.HI * 0.17,
+    Fuel.Mapping=="NG" & PMmapped=="ST" & (Boiler.Mapping=="CYCLONE" | Boiler.Mapping=="DRY CYCLONE" | Boiler.Mapping=="DRY STOKER" | Boiler.Mapping=="DRY VERTICAL" | Boiler.Mapping=="DRY WALL" | Boiler.Mapping=="FLUIDIZED" | Boiler.Mapping=="STOKER" | Boiler.Mapping=="WALL" | Boiler.Mapping=="WET CYCLONE") ~ Annual.HI * 0.28,
+    Fuel.Mapping=="NG" ~ Annual.HI * 0.328,
+    Fuel.Mapping=="OBG" & PMmapped=="ST" ~ Annual.HI * 0.11283,
+    Fuel.Mapping=="OBG" & PMmapped=="IC" ~ Annual.HI * 2.64648,
+    Fuel.Mapping=="OBG" ~ Annual.HI * 0.3136,
+    Fuel.Mapping=="OBL" & PMmapped=="GT" ~ Annual.HI * 4.7166,
+    Fuel.Mapping=="OBL" & PMmapped=="IC" ~ Annual.HI * 17.1486,
+    Fuel.Mapping=="OBS" ~ Annual.HI * 2,
+    Fuel.Mapping=="OG" & PMmapped=="GT" ~ Annual.HI * 0.26382,
+    Fuel.Mapping=="OG" & PMmapped=="IC" ~ Annual.HI * 2.22641,
+    Fuel.Mapping=="OG" ~ Annual.HI * 0.15282,
+    Fuel.Mapping=="PC" & PMmapped=="ST" & (Boiler.Mapping=="FLUIDIZED" | Boiler.Mapping=="DRY FLUIDIZED") ~ Annual.HI * 5,
+    Fuel.Mapping=="PC" ~ Annual.HI * 21,
+    Fuel.Mapping=="PG" ~ Annual.HI * 803.36,
+    Fuel.Mapping=="PRG" & Boiler.Mapping=="DRY WALL" ~ Annual.HI * 0.28,
+    Fuel.Mapping=="PRG" ~ Annual.HI * 0.17,
+    Fuel.Mapping=="RC" ~ Annual.HI * 10,
+    Fuel.Mapping=="RFO" & PMmapped=="IC" ~ Annual.HI * 20.118,
+    Fuel.Mapping=="RFO" & PMmapped %in% c("CA","CS","CT","GT") ~ Annual.HI * 5.5314,
+    Fuel.Mapping=="RFO" & PMmapped=="ST" & (Boiler.Mapping=="DRY TANGENTIAL" | Boiler.Mapping=="TANGENTIAL") ~ Annual.HI * 1.344,
+    Fuel.Mapping=="RFO" ~ Annual.HI * 1.974,
+    Fuel.Mapping=="SGC" ~  Annual.HI * 0.28,
+    Fuel.Mapping=="SGP" ~ Annual.HI * 0.28,
+    Fuel.Mapping=="SUB" & Boiler.Mapping=="WET WALL" ~ Annual.HI * 24,
+    Fuel.Mapping=="SUB" & Boiler.Mapping=="DRY WALL" ~ Annual.HI * 7.4,
+    Fuel.Mapping=="SUB" & (Boiler.Mapping=="CYCLONE" | Boiler.Mapping=="WET CYCLONE") ~ Annual.HI * 17,
+    Fuel.Mapping=="SUB" & (Boiler.Mapping=="TANGENTIAL" | Boiler.Mapping=="DRY TANGENTIAL" | Boiler.Mapping=="WET TANGENTIAL") ~ Annual.HI * 7.2,
+    Fuel.Mapping=="SUB" ~ Annual.HI * 5,
+    Fuel.Mapping=="TDF" ~ Annual.HI * 11,
+    Fuel.Mapping=="WC" ~ Annual.HI * 3.6,
+    Fuel.Mapping=="WDL" ~ Annual.HI * 0.22806,
+    Fuel.Mapping=="WDS" & (Boiler.Mapping=="DRY WALL" | Boiler.Mapping=="WET TANGENTIAL" | Boiler.Mapping=="DRY TANGENTIAL") ~ Annual.HI * 2.51,
+    Fuel.Mapping=="WDS" & (Boiler.Mapping=="WET STOKER" | Boiler.Mapping=="STOKER" | Boiler.Mapping=="DRY STOKER") ~ Annual.HI * 1.5,
+    Fuel.Mapping=="WDS" ~ Annual.HI * 2,
+    Fuel.Mapping=="WO" & PMmapped=="IC" ~ Annual.HI * 14.0784,
+    Fuel.Mapping=="WO" & PMmapped=="ST" ~ Annual.HI * 0.798,
+    Fuel.Mapping=="WO"  ~ Annual.HI  * 3.8724
+)
+) -> CAMD_EIA_join
+```
+
+```{r}
+# replace missing Annual NOx mass with calculated NOx mass
+# change NOx mass data source to calculated
+CAMD_EIA_join$NOx.mass.data.source[is.na(CAMD_EIA_join$Annual.NOx.mass)] <- "Calculated"
+
+## for observations with missing NOx mass replace it with NOx calculated mass
+CAMD_EIA_join$Annual.NOx.mass[is.na(CAMD_EIA_join$Annual.NOx.mass)] <-  CAMD_EIA_join$Annual.NOx.mass.calc[is.na(CAMD_EIA_join$Annual.NOx.mass)]
+
+# if Annual NOx mass data source wasn't filled in with calculated value, replace NOx mass data source with NA
+CAMD_EIA_join$NOx.mass.data.source[is.na(CAMD_EIA_join$Annual.NOx.mass)] <- NA
+```
+
+
+```{r}
+# TEST: check to make sure calculation is correct
+CAMD_EIA_join %>% filter(NOx.mass.data.source=="Calculated") %>% select(c("idx","Op.Year","Oris.Code","Annual.NOx.mass","Annual.NOx.mass.calc","NOx.mass.data.source","Annual.HI","PMmapped","Fuel.Mapping","Boiler.Mapping","Annual.Avg.Sulfur.Content")) %>% head()
+```
+
+```{r}
+# how many are missing annual NOx mass
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%    # make observations distinct by index as there might be many rows per unit
+  filter(is.na(Annual.NOx.mass)) %>% nrow()
+```
+
+
+```{r}
+# how many are missing annual NOx mass and are operating
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>% 
+  filter(is.na(Annual.NOx.mass) & Op.Status=="OPR") %>% nrow()
+```
+
+```{r}
+# how many are missing annual NOx mass, are operating, and annual op time > 0
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>% 
+  filter(is.na(Annual.NOx.mass) & Op.Status=="OPR" & Annual.Op.Time>0) %>% nrow()
+```
+
+```{r}
+# how many are missing annual NOx mass, are operating, and annual op time > 0
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>% 
+  filter(is.na(Annual.NOx.mass) & Op.Status=="OPR" & Annual.Op.Time>0 & is.na(Annual.HI)) %>% nrow()
+```
+
+
+*Annual NOx Mass Data Gaps Summary*  
+64 units with a status of operating and an annual operating time greater than 0 were missing Annual NOx mass. After imputation, only 15 values are still missing Annual NOX mass, with 14 of those missing heat input.
+
+
+
+## CO2 Data Gaps## 
+Look at observations with missing Annual.CO2.mass.
+```{r}
+# how many are missing annual CO2 mass
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%    # make observations distinct by index as there might be many rows per unit
+  filter(is.na(Annual.CO2.mass)) %>% nrow()
+```
+
+```{r}
+# how many are missing annual CO2 mass and are operating
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%    # make observations distinct by index as there might be many rows per unit
+  filter(is.na(Annual.CO2.mass) & Op.Status=="OPR") %>% nrow()
+```
+
+```{r}
+# how many are missing annual CO2 mass, are operating and annual op time > 0
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%    # make observations distinct by index as there might be many rows per unit
+  filter(is.na(Annual.CO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0) %>% nrow()
+```
+
+
+**Address gaps in Annual CO2 emissions**  
+For gaps in CO2 emissions data, the CO2 emissions are based on heat input and an emission factor.
+The CO2 emissions from hydrogen, nuclear, purchased steam, solar, waste heat, water, wind, and energy storage are considered to be zero. The CO2 emissions for units with a fuel cell prime mover are also assumed to be zero.  
+
+
+Calculate Annual CO2 mass using eGRID Emission Factor (Table C-1)
+```{r}
+# fill in missing CO2 annual emissions
+CAMD_EIA_join %>% mutate(Annual.CO2.mass.calc = case_when(
+    Fuel.Mapping=="AB" ~ Annual.HI * 0.13026,
+    Fuel.Mapping=="ANT" ~ Annual.HI * 0.11413,
+    Fuel.Mapping=="BFG" ~ Annual.HI * 0.30239,
+    Fuel.Mapping=="BIT" ~ Annual.HI * 0.10296,
+    Fuel.Mapping=="BLQ" ~ Annual.HI * 0.11083,
+    Fuel.Mapping=="COG" ~ Annual.HI * 0.05164,
+    Fuel.Mapping=="DFO" ~ Annual.HI * 0.08166,
+    Fuel.Mapping=="H" ~ Annual.HI * 0.00000,
+    Fuel.Mapping=="JF" ~ Annual.HI * 0.07961,
+    Fuel.Mapping=="KER" ~ Annual.HI * 0.08289,
+    Fuel.Mapping=="LFG" ~ Annual.HI * 0.06350,
+    Fuel.Mapping=="LIG" ~ Annual.HI * 0.10622,
+    Fuel.Mapping=="MSW" ~ Annual.HI * 0.09998,
+    Fuel.Mapping=="MWH" ~ Annual.HI * 0.00000,
+    Fuel.Mapping=="NG" ~ Annual.HI * 0.05844,
+    Fuel.Mapping=="NUC" ~ Annual.HI * 0.00000,
+    Fuel.Mapping=="OBG" ~ Annual.HI * 0.06350,
+    Fuel.Mapping=="OBL" ~ Annual.HI * 0.09257,
+    Fuel.Mapping=="OBS" ~ Annual.HI * 0.11630,
+    Fuel.Mapping=="OG" ~ Annual.HI * 0.05844,
+    Fuel.Mapping=="PC" ~ Annual.HI * 0.11289,
+    Fuel.Mapping=="PG" ~ Annual.HI * 0.06775,
+    Fuel.Mapping=="PRG" ~ Annual.HI * 0.05844,
+    Fuel.Mapping=="PUR" ~ Annual.HI * 0.00000,
+    Fuel.Mapping=="RC" ~ Annual.HI * 0.10529,
+    Fuel.Mapping=="RFO" ~ Annual.HI * 0.08159,
+    Fuel.Mapping=="SGP" ~ Annual.HI * 0.05844,
+    Fuel.Mapping=="SLW" ~ Annual.HI * 0.09257,
+    Fuel.Mapping=="SUB" ~ Annual.HI * 0.10695,
+    Fuel.Mapping=="SUN" ~ Annual.HI * 0.00000,
+    Fuel.Mapping=="TDF" ~ Annual.HI * 0.09477,
+    Fuel.Mapping=="WAT" ~ Annual.HI * 0.00000,
+    Fuel.Mapping=="WC" ~ Annual.HI * 0.10529,
+    Fuel.Mapping=="WDL" ~ Annual.HI * 0.09257,
+    Fuel.Mapping=="WDS" ~ Annual.HI * 0.10340,
+    Fuel.Mapping=="WH" ~ Annual.HI * 0.00000,
+    Fuel.Mapping=="WND" ~ Annual.HI * 0.00000,
+    Fuel.Mapping=="WO" ~ Annual.HI * 0.08525
+)
+) -> CAMD_EIA_join
+```
+
+```{r}
+# replace missing Annual CO2 mass with calculated CO2 mass 
+# change CO2 mass data source to calculated
+CAMD_EIA_join$CO2.mass.data.source[is.na(CAMD_EIA_join$Annual.CO2.mass)] <- "Calculated"
+
+## for observations with missing CO2 mass replace it with NOx calculated mass
+CAMD_EIA_join$Annual.CO2.mass[is.na(CAMD_EIA_join$Annual.CO2.mass)] <-  CAMD_EIA_join$Annual.CO2.mass.calc[is.na(CAMD_EIA_join$Annual.CO2.mass)]
+
+# if Annual CO2 mass data source wasn't filled in with calculated value, replace CO2 mass data source with NA
+CAMD_EIA_join$CO2.mass.data.source[is.na(CAMD_EIA_join$Annual.CO2.mass)] <- NA
+```
+
+```{r}
+# TEST: check to make sure calculation is correct
+CAMD_EIA_join %>% filter(CO2.mass.data.source=="Calculated") %>% select(Oris.Code, Op.Year, Annual.HI, Annual.Op.Time,Annual.CO2.mass, CO2.mass.data.source, Fuel.Mapping) %>% head()
+```
+
+
+```{r}
+# how many are missing annual CO2 mass
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%    # make observations distinct by index as there might be many rows per unit
+  filter(is.na(Annual.CO2.mass)) %>% nrow()
+```
+
+```{r}
+# how many are missing annual CO2 mass and are operating
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%    # make observations distinct by index as there might be many rows per unit
+  filter(is.na(Annual.CO2.mass) & Op.Status=="OPR") %>% nrow()
+```
+
+```{r}
+# how many are missing annual CO2 mass, are operating and annual op time > 0
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%    # make observations distinct by index as there might be many rows per unit
+  filter(is.na(Annual.CO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0) %>% nrow()
+```
+
+
+```{r}
+# how many are missing annual CO2 mass, are operating and annual op time > 0 and are missing heat input
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>%    # make observations distinct by index as there might be many rows per unit
+  filter(is.na(Annual.CO2.mass) & Op.Status=="OPR" & Annual.Op.Time>0) %>% nrow()
+```
+*Annual CO2 Mass Data Gaps Summary*  
+There were 13221 units with an operating status of Operating and an annual operating time > 0 with missing values for Annual CO2 Mass. After imputation, there were 738 units still missing values for Annual CO2 mass because they are missing heat input.  
+
+
+*Data Gaps Sumary*  
+After imputation, for units with a status of operating and an annual time > 0, we are left with the following missing values:  
+- 375 units are missing heat input  
+- 1147 units are missing Annual SO2 mass, with 359 missing heat input, 446 missing fuel type, and 504 missing sulfur content. Of those units still missing average sulfur content, 492 of those are for units with prime mover GT and WO for fuel while 12 have a prime mover of ST and a fuel of TDF. If there is a suitable average sulfur content for each of these, it can be included and that would take care of 504 missing values.  
+- 15 units missing Annual NOx mass, with 14 of those missing heat input  
+- 738 units missing Annual CO2 mass, with all missing heat input
+
+
+
+
+## Issues to Address Going Forward ##
+The following items need to be addressed in furthering the imputation of the data gaps in the above:
+- Choosing appropriate mapping of CAMD Unit Type to EIA Prime Mover  
+- how to deal with CAMD units where there is more than one value in Primary Fuel Type field  
+- Choosing appropriate mapping of CAMD Unit Type to EIA Boiler Firing Type  
+- how to deal with observations still missing values after imputation  
+- how to deal with NAs in Annual Operating Time    
+
+
+
+# Calculate Annual Emission Rates #  
+For SO2, NOx, and CO2 emissions, calculate the annual emission rates (mass/heat input and mass/gross load).
+```{r}
+# how many are missing Gross Load
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all=TRUE) %>% 
+  filter(is.na(Annual.Gross.Load) & Op.Status=="OPR" & Annual.Op.Time > 0) %>% nrow()
+```
+
+```{r}
+# how many are missing Heat Input
+CAMD_EIA_join %>% 
+  distinct(idx, .keep_all = TRUE) %>% # distinct values based on unit (some now have multiple observations due to join)
+  filter(is.na(Annual.HI) & Op.Status=="OPR" & Annual.Op.Time>0) %>% nrow()
+```
+
+```{r}
+# get total Annual Heat Input, Gross Load, SO2, NOx, CO2 emissions per facility per year
+CAMD_EIA_join %>%
+  group_by(Op.Year, Oris.Code) %>%
+  summarize(Facility.Annual.HI = sum(Annual.HI),
+            Facility.Annual.GL = sum(Annual.Gross.Load),
+            Facility.Annual.SO2 = sum(Annual.SO2.mass),
+            Facility.Annual.NOx = sum(Annual.NOx.mass),
+            Facility.Annual.CO2 = sum(Annual.CO2.mass)) -> facilitytotals
+```
+
+
+```{r}
+# compute emission rates
+facilitytotals %>% 
+  mutate(Annual.SO2.Emission.Rate.HI = Facility.Annual.SO2/Facility.Annual.HI,  
+         Annual.SO2.Emission.Rate.GL = Facility.Annual.SO2/Facility.Annual.GL,
+         Annual.NOx.Emission.Rate.HI = Facility.Annual.NOx/Facility.Annual.HI,
+         Annual.NOx.Emission.Rate.GL = Facility.Annual.NOx/Facility.Annual.GL,
+         Annual.CO2.Emission.Rate.HI = Facility.Annual.CO2/Facility.Annual.HI,
+         Annual.CO2.Emission.Rate.GL = Facility.Annual.CO2/Facility.Annual.GL) -> facilitytotals
+```
+
+```{r}
+facilitytotals %>% head()
+```
+
+```{r}
+summary(facilitytotals)
+```
+
+
+
+```{r}
+# average emission rates per facility
+facilitytotals %>% 
+  group_by(Op.Year, Oris.Code) %>%
+  summarize(Annual.SO2.Emission.Rate.HI = mean(Annual.SO2.Emission.Rate.HI, na.rm = TRUE),
+            Annual.SO2.Emission.Rate.GL = mean(Annual.SO2.Emission.Rate.GL, na.rm = TRUE),
+            Annual.NOx.Emission.Rate.HI = mean(Annual.NOx.Emission.Rate.HI, na.rm = TRUE),
+            Annual.NOx.Emission.Rate.GL = mean(Annual.NOx.Emission.Rate.GL, na.rm = TRUE),
+            Annual.CO2.Emission.Rate.HI = mean(Annual.CO2.Emission.Rate.HI, na.rm = TRUE),
+            Annual.CO2.Emission.Rate.GL = mean(Annual.CO2.Emission.Rate.GL, na.rm = TRUE)
+  ) -> emissionrates
+emissionrates %>% head()
+```
+
+```{r}
+# gather the emission rates into key-value pairs
+emissionrates <- emissionrates %>% gather(emissionrates, values, -Op.Year, -Oris.Code)
+```
+
+
+```{r}
+# average emission rates over time for one facility
+emissionrates %>% 
+  filter(Oris.Code==3) %>% 
+  ggplot(aes(x = Op.Year, y = values)) + geom_line() + facet_wrap(~emissionrates) + labs(x = "Year", y = "Emission Rates")
+```
+
+
+
+
+
+
+
+
+
+
+
+
